@@ -1,0 +1,14 @@
+<?xml version='1.0' encoding='utf-8'?>
+<package format="3">
+  <name>casper</name>
+  <version>0.0.0</version>
+  <description>CASPER++ multi-agent task allocation core: goals, team skills, allocation and schedule</description>
+  <maintainer email="dev@voshch.dev">voshch</maintainer>
+  <license>TODO</license>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

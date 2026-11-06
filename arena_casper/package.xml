@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='utf-8'?>
+<package format="3">
+  <name>arena_casper</name>
+  <version>0.0.0</version>
+  <description>CASPER++ multi-agent task allocation as an Arena task layer</description>
+  <maintainer email="dev@voshch.dev">voshch</maintainer>
+  <license>TODO</license>
+
+  <exec_depend>arena_runtime</exec_depend>
+  <exec_depend>arena_simulation_setup</exec_depend>
+  <exec_depend>casper</exec_depend>
+  <exec_depend>task_generator</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>arena_robots</test_depend>
+  <test_depend>arena_simulation_setup</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

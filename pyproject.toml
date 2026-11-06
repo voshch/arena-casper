@@ -1,0 +1,21 @@
+[project]
+name = "casper-workspace"
+version = "0.0.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "arena-casper",
+    "casper",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+arena-casper = { workspace = true }
+casper = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+    "arena_casper",
+    "casper",
+]
