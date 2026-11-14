@@ -299,7 +299,7 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
         task = goal.tasks[task_id]
         schedule.start(task_id)
         bound = self._scene is not None and task_id in self._scene.tasks
-        self._ctx.episode.task_event(TaskEvent(task=task_id, kind="started", robot=ped, detail={"phases": 0 if bound else len(task.workspaces or ())}))
+        self._ctx.episode.task_event(TaskEvent(task=task_id, kind="started", robot=ped, detail={"phases": 0 if bound else len(task.workspaces or ()), "zones": list(task.workspaces or ())}))
         self._logger.info(f"casper {ped} starts {task_id}")
         if bound:
             return self._fail(schedule, task_id, ped)
@@ -363,7 +363,7 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
                 arm_reach(manager) if self._scene is not None else None,
                 can_move=TaskKind.GOTO_POSE in manager.accepts,
             )
-            report(TaskEvent(task=task_id, kind="started", robot=robot, detail={"phases": len(request.phases)}))
+            report(TaskEvent(task=task_id, kind="started", robot=robot, detail={"phases": len(request.phases), "zones": list(goal.tasks[task_id].workspaces or ())}))
             try:
                 await manager.submit_task(request)
             except ValueError as e:

@@ -283,7 +283,7 @@ def test_tick_reports_start_and_outcome(tmp_path: pathlib.Path) -> None:
     r0.end("met")
     asyncio.run(task.tick({}, []))
     assert _kinds(task) == [("cook", "started", "r0"), ("cook", "met", "r0"), ("greet", "started", "r0")]
-    assert next(event.detail for event in task.events if event.kind == "started") == {"phases": 2}
+    assert next(event.detail for event in task.events if event.kind == "started") == {"phases": 2, "zones": ["kitchen", "garden"]}
 
 
 def test_failure_reports_the_fallback_owner(tmp_path: pathlib.Path) -> None:

@@ -427,7 +427,7 @@ def test_pedestrian_member_walks_its_task_and_the_claims_end_with_the_goal(tmp_p
 
     asyncio.run(scenario())
     assert layer.kinds() == [("greet", "started", "walker"), ("greet", "met", "walker")]
-    assert next(event.detail for event in layer.events if event.kind == "started") == {"phases": 1}
+    assert next(event.detail for event in layer.events if event.kind == "started") == {"phases": 1, "zones": ["kitchen"]}
     assert asyncio.run(layer.task.done)
     claimed = layer.world.claimed()
     assert any(ped.animation_state == Pedestrian.WALKING for batch in claimed for ped in batch.pedestrians)
