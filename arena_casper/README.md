@@ -8,12 +8,12 @@ priority order. A pedestrian member walks its tasks itself, see [Pedestrian memb
 
 ```bash
 arena feature tasks add casper
-arena launch sim:=flatsim world:=office_1 robot:=jackal[3] \
-    task_layer:=casper task.robots:=stationary \
-    task.casper.goal:=$(ros2 pkg prefix arena_casper)/share/arena_casper/configs/office_1/goal.json \
-    task.casper.team:=$(ros2 pkg prefix arena_casper)/share/arena_casper/configs/office_1/team.yaml \
-    task.casper.mode:=balance_workload
+arena launch sim:=mujoco world:=backyard_b robot:=fr3[3],tiago \
+    task_layer:=casper task.robots:=scenario task.obstacles:=scenario \
+    task.scenario.file:=exp1_b
 ```
+
+Each CASPER scene is a scenario of its world, see [Scenes](#scenes).
 
 Goal format and allocation rules: [casper](../casper/README.md).
 
@@ -26,14 +26,17 @@ A robot the team file does not list keeps what the robots axis gives it.
 
 | Param | Default | Meaning |
 | --- | --- | --- |
-| `task.casper.goal` | | CASPER goal JSON |
-| `task.casper.team` | | team YAML |
-| `task.casper.scene` | | scene file binding tasks to entities and objects, empty for none |
+| `task.casper.goal` | | CASPER goal JSON, empty reads `goal.json` of the active scenario |
+| `task.casper.team` | | team YAML, empty reads `team.yaml` of the active scenario |
+| `task.casper.scene` | | scene file binding tasks to entities and objects, empty reads `scene.yaml` of the active scenario if it has one |
 | `task.casper.mode` | `skill` | `skill`, `preference`, `balance_skill_preference` or `balance_workload` |
 | `task.casper.top_k` | `3` | fallback candidates kept per task |
 | `task.casper.duration_scale` | `1.0` | factor from a task's `duration` to its hold in seconds |
 
-Goal and team are read at every reset.
+Goal, team and scene are read at every reset. With `task.casper.goal` and `task.casper.team`
+empty they come from the folder of the scenario `task.scenario.file` names in the loaded world,
+and its `casper.yaml` sets `mode`, `top_k` and `duration_scale` over these params. Setting both
+params reads ad-hoc files instead.
 
 ## Team
 
@@ -104,7 +107,7 @@ in the abstract frame of the world, the layer converts.
 
 ## Scene
 
-`task.casper.scene` names a YAML file next to the goal that binds tasks to world objects. A
+`task.casper.scene` names a YAML file, else `scene.yaml` of the active scenario, that binds tasks to world objects. A
 bound task picks, carries and places instead of holding at its workspace.
 
 ```yaml
@@ -193,13 +196,60 @@ Turns the config folder of CASPER_MAS into `team.yaml`, a goal copy `goal.json` 
 
 Both commands print their arguments on `--help` and with no arguments, and name the valid forms on a bad argument.
 
-## Example
+## Scenes
 
-[configs/office_1](configs/office_1) runs a ten-task office meeting on world `office_1`
-with three jackals, jackal_0 as supervisor.
+A scene is a scenario folder of its world holding `scenario.yaml` (the robots with `name` and
+`model`, the pedestrians) next to the CASPER files:
 
-[configs/office_1_boxes](configs/office_1_boxes) runs a three-task box demo on world
-`office_1` with one tiago (`robot:=tiago`) as team and supervisor. FetchBox picks the shelf box
-`storage_box_20_2nd_2` in the storage room, DeliverBox places it in reception, RelocateBox picks
-`storage_box_30_2nd_2` from the same shelf and places it in the big meeting room, and BoxesMoved ends the
-goal at reception. `scene.yaml` holds the bindings, `goal.json` is in CASPER's format.
+| File | Content |
+| --- | --- |
+| `goal.json` | the goal, required |
+| `team.yaml` | the team, required, member names equal the robot names of `scenario.yaml` |
+| `scene.yaml` | optional scene bindings |
+| `casper.yaml` | optional `mode`, `top_k`, `duration_scale` |
+
+| Scene | World | Robots | `casper.yaml` |
+| --- | --- | --- | --- |
+| `casper` | `office_1` | `jackal_0`, `jackal_1`, `jackal_2` | `mode: balance_workload` |
+| `casper_boxes` | `office_1` | `tiago` | `mode: skill`, `duration_scale: 0.5` |
+| `exp1` | `backyard` | `fr3_0`, `fr3_1`, `tiago` | `mode: skill`, `duration_scale: 0.01` |
+| `exp1_b` | `backyard_b` | `fr3_0`, `fr3_1`, `fr3_2`, `tiago` | `mode: preference`, `top_k: 1`, `duration_scale: 0.01` |
+
+`casper` is a ten-task office meeting with three jackals, jackal_0 as supervisor, starting in the
+main hallway. `casper_boxes` is a three-task box demo with one tiago as team and supervisor: FetchBox
+picks the shelf box `storage_box_20_2nd_2` in the storage room, DeliverBox places it in reception,
+RelocateBox picks `storage_box_30_2nd_2` from the same shelf and places it in the big meeting room,
+and BoxesMoved ends the goal at reception. The tiago starts in the storage room in front of the
+shelves at (14.0, 18.5). `exp1_b` and `exp1` are Leticia Berto's barbecue party (27 tasks each,
+converted from her `exp1_b` and `exp1`) on `backyard_b` (fr3_0 at the salad prep table, fr3_1 at the
+vegetable prep table, fr3_2 at the meat grill table, human_host_1 as supervisor) and `backyard`
+(fr3_0 at the grill table, fr3_1 at the prep table, fr3_0 as supervisor). `human_host_1` is a
+`kind: pedestrian` member and the scenario's pedestrian of that name. The scenario parks the
+robots at their tables.
+
+Launch a scene with `task.robots:=scenario task.obstacles:=scenario` and its world:
+
+```bash
+arena launch sim:=flatsim world:=office_1 robot:=jackal[3] \
+    task_layer:=casper task.robots:=scenario task.obstacles:=scenario \
+    task.scenario.file:=casper
+```
+
+### Switching scenes
+
+A scene switch is a normal between-episode scenario switch: the queued `world`, the robot fleet of
+the scenario and `task.scenario.file` apply at the next reset, where the layer loads the new
+folder. Through the MCP server:
+
+```python
+episode_queue(
+    world="backyard",
+    modes={"robots": "scenario", "obstacles": "scenario"},
+    params={"task.scenario.file": "exp1"},
+)
+```
+
+then `run_episode`. The same through the service `<env>/config/queue_episode`
+(`arena_runtime_msgs/srv/QueueEpisode`): `action: 0` (MERGE), `modes` as key-value pairs
+(`robots: scenario`, `obstacles: scenario`), `world: backyard` and `params` with the parameter
+`task.scenario.file` set to `exp1`, then the `run_episode` action.

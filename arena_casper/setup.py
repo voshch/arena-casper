@@ -1,5 +1,3 @@
-import glob
-
 from setuptools import find_packages, setup
 
 package_name = 'arena_casper'
@@ -16,8 +14,6 @@ setup(
         ('share/ament_index/resource_index/packages',
          ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/configs/office_1', glob.glob('configs/office_1/*')),
-        ('share/' + package_name + '/configs/office_1_boxes', glob.glob('configs/office_1_boxes/*')),
     ],
     zip_safe=True,
     maintainer='voshch',

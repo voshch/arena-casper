@@ -69,19 +69,33 @@ def _member(level: float, workspace: list[str] | None = None) -> dict[str, objec
     return {"skills": {"party": {"work": [level, 1]}}, "workspace": workspace or list(ZONES)}
 
 
-def _casper(tmp_path: pathlib.Path, tasks: list[dict[str, object]], dependencies: list[list[str]], members: dict[str, dict[str, object]], managers: list[_Manager], plan: object = None, duration_scale: float = 1.0) -> tuple[object, _Inner, list[str]]:
+def _casper(tmp_path: pathlib.Path, tasks: list[dict[str, object]], dependencies: list[list[str]], members: dict[str, dict[str, object]], managers: list[_Manager], plan: object = None, duration_scale: float = 1.0, scenario: str = "", settings: dict[str, object] | None = None) -> tuple[object, _Inner, list[str]]:
     import rclpy.logging
     from arena_runtime.env.task_layer import ResetPlan
 
     from casper.allocation import Mode
     from arena_casper.layer import CasperTask
 
-    goal, team = _write(tmp_path, tasks, dependencies, members, supervisor=next(iter(members)))
+    from arena_simulation_setup.tree import SimplePathResolver
+    from arena_simulation_setup.tree.World import WorldIdentifier
+
+    world = f"casper_{tmp_path.name}"
+    folder = tmp_path
+    if scenario:
+        folder = tmp_path / "worlds" / world / "scenarios" / scenario
+        folder.mkdir(parents=True)
+        (folder / "scenario.yaml").write_text("format: arena-scenario/2\n")
+        WorldIdentifier.use(SimplePathResolver(WorldIdentifier, tmp_path / "worlds"))
+        if settings is not None:
+            (folder / "casper.yaml").write_text(yaml.safe_dump(settings))
+    goal, team = _write(folder, tasks, dependencies, members, supervisor=next(iter(members)))
+    if scenario:
+        goal = team = ""
     aborted: list[str] = []
     events: list[object] = []
     ctx = SimpleNamespace(
         robots={manager.name: manager for manager in managers},
-        world_manager=SimpleNamespace(world_compacted=lambda: SimpleNamespace(zone_ref_names=lambda: list(ZONES))),
+        world_manager=SimpleNamespace(loaded_world=world, world_compacted=lambda: SimpleNamespace(zone_ref_names=lambda: list(ZONES))),
         episode=SimpleNamespace(abort_episode=aborted.append, task_event=events.append),
     )
     params = SimpleNamespace(
@@ -93,7 +107,7 @@ def _casper(tmp_path: pathlib.Path, tasks: list[dict[str, object]], dependencies
         DURATION_SCALE=SimpleNamespace(value=duration_scale),
     )
     inner = _Inner(plan if plan is not None else ResetPlan())
-    node = SimpleNamespace(get_logger=lambda: rclpy.logging.get_logger("test_casper_layer"))
+    node = SimpleNamespace(get_logger=lambda: rclpy.logging.get_logger("test_casper_layer"), get_parameter=lambda name: SimpleNamespace(value=scenario))
     task = CasperTask(node=node, ctx=ctx, params=params, inner=inner)
     task.events = events
     return task, inner, aborted
@@ -370,3 +384,39 @@ def test_a_robot_without_an_arm_has_no_reach() -> None:
     from arena_casper.layer import arm_reach
 
     assert arm_reach(_view("jackal")) is None
+
+
+def test_reset_reads_goal_and_team_from_the_active_scenario_folder(tmp_path: pathlib.Path) -> None:
+    r0 = _Manager("r0")
+    task, _, _ = _casper(tmp_path, [{"id": "cook", "required_constraints": {"workspace": ["kitchen"]}}], [], {"r0": _member(0.9)}, [r0], scenario="party")
+    asyncio.run(task.reset_robots(_record()))
+    asyncio.run(task.tick({}, []))
+    assert _targets(r0.requests[0]) == [("kitchen", 0.0)]
+    allocated = next(event for event in task.events if event.kind == "allocated")
+    assert allocated.detail["goal"] == str(tmp_path / "worlds" / f"casper_{tmp_path.name}" / "scenarios" / "party" / "goal.json")
+
+
+def test_scenario_casper_yaml_overrides_mode_top_k_and_duration_scale(tmp_path: pathlib.Path) -> None:
+    r0 = _Manager("r0")
+    task, _, _ = _casper(
+        tmp_path,
+        [{"id": "cook", "duration": 40, "required_constraints": {"workspace": ["kitchen"]}}],
+        [],
+        {"r0": _member(0.9)},
+        [r0],
+        duration_scale=1.0,
+        scenario="party",
+        settings={"mode": "balance_workload", "top_k": 1, "duration_scale": 0.5},
+    )
+    asyncio.run(task.reset_robots(_record()))
+    asyncio.run(task.tick({}, []))
+    assert _targets(r0.requests[0]) == [("kitchen", 20.0)]
+    allocated = next(event for event in task.events if event.kind == "allocated")
+    assert (allocated.detail["mode"], allocated.detail["top_k"]) == ("balance_workload", 1)
+
+
+def test_scenario_folder_without_goal_and_team_is_refused_by_name(tmp_path: pathlib.Path) -> None:
+    task, _, _ = _casper(tmp_path, [{"id": "cook"}], [], {"r0": _member(0.9)}, [_Manager("r0")], scenario="party")
+    (tmp_path / "worlds" / f"casper_{tmp_path.name}" / "scenarios" / "party" / "team.yaml").unlink()
+    with pytest.raises(ValueError, match=r"scenario folder .*party lacks \['team.yaml'\]"):
+        asyncio.run(task.reset_robots(_record()))

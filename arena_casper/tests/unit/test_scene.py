@@ -9,7 +9,8 @@ from casper.goal import load_goal
 from arena_casper.scene import Binding, Place, load_scene, parse_scene
 from arena_casper.team import load_team
 
-CONFIGS = pathlib.Path(__file__).parents[2] / "configs" / "office_1_boxes"
+CONFIGS = pathlib.Path(__file__).parents[5] / "arena_simulation_setup" / "worlds" / "office_1" / "scenarios" / "casper_boxes"
+SCENARIO_FOLDER = pytest.mark.skipif(not CONFIGS.is_dir(), reason="the scenario folders live in the Arena metarepo")
 
 
 def test_pick_and_place_bindings_parse() -> None:
@@ -70,6 +71,7 @@ def test_load_scene_names_the_file(tmp_path: pathlib.Path) -> None:
         load_scene(path)
 
 
+@SCENARIO_FOLDER
 def test_boxes_example_binds_goal_tasks_the_team_can_take() -> None:
     goal = load_goal(CONFIGS / "goal.json")
     scene = load_scene(CONFIGS / "scene.yaml")

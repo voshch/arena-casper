@@ -10,7 +10,8 @@ from arena_casper.team import load_team, parse_team
 
 MOBILE = {"can_move": True, "can_manipulate": False}
 ARM = {"can_move": True, "can_manipulate": True}
-CONFIGS = pathlib.Path(__file__).parents[2] / "configs" / "office_1"
+CONFIGS = pathlib.Path(__file__).parents[5] / "arena_simulation_setup" / "worlds" / "office_1" / "scenarios" / "casper"
+SCENARIO_FOLDER = pytest.mark.skipif(not CONFIGS.is_dir(), reason="the scenario folders live in the Arena metarepo")
 
 
 def _member(level: float, constraints: dict[str, object] | None = None) -> dict[str, object]:
@@ -53,6 +54,7 @@ def test_team_refuses_skills_that_are_no_level_rank_pair() -> None:
         parse_team({"supervisor": "a", "members": {"a": {"skills": {"party": {"cook": [0.5]}}}}}, {"a": MOBILE})
 
 
+@SCENARIO_FOLDER
 def test_office_example_balances_over_the_three_jackals() -> None:
     goal = load_goal(CONFIGS / "goal.json")
     team = load_team(CONFIGS / "team.yaml", dict.fromkeys(("jackal_0", "jackal_1", "jackal_2"), MOBILE)).team

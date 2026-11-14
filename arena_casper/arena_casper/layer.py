@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import math
+import pathlib
 import typing
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 
 import attrs
+import yaml
 from arena_rclpy_mixins.params import Choices, Param, Range, declare
 from arena_runtime.env.task_api import NodeInterface, PhaseState, RobotManager, TaskKind
-from arena_runtime.env.task_layer import EpisodeRecord, ResetPlan, TaskContext, TaskEvent, TaskModes
+from arena_runtime.env.task_layer import EpisodeRecord, FleetEntry, ResetPlan, TaskContext, TaskEvent, TaskModes
+from arena_simulation_setup.tree.World import WorldIdentifier
 from casper.allocation import Allocation, Mode, allocate
 from casper.goal import Goal, load_goal
 from casper.schedule import Schedule
@@ -41,6 +44,8 @@ __all__ = [
 ]
 
 PARAM_NAMESPACE = "task.casper"
+SCENARIO_PARAM = "task.scenario.file"
+SCENARIO_SETTINGS = "casper.yaml"
 STOW = "stow"
 CARRY = "carry"
 
@@ -100,6 +105,16 @@ def arm_reach(manager: RobotManager) -> ArmReach | None:
     return None
 
 
+@attrs.frozen
+class _Sources:
+    goal: str
+    team: str
+    scene: str
+    mode: Mode
+    top_k: int
+    duration_scale: float
+
+
 @attrs.define
 class _Dispatch:
     task: str
@@ -126,6 +141,7 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
         self._scene: Scene | None = None
         self._site: Site | None = None
         self._cleared = False
+        self._sources = _Sources("", "", params.SCENE.value, params.MODE.value, params.TOP_K.value, params.DURATION_SCALE.value)
 
     @property
     def schedule(self) -> Schedule | None:
@@ -135,29 +151,62 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
     async def done(self) -> bool:
         return self._schedule is not None and self._schedule.done
 
+    def _scenario_dir(self) -> pathlib.Path:
+        """The folder of the scenario task.scenario.file names in the loaded world."""
+        world = self._ctx.world_manager.loaded_world
+        name = str(self.node.get_parameter(SCENARIO_PARAM).value)
+        return WorldIdentifier(world).resolve_sync().scenario(name).resolve_sync().path
+
+    def _resolve_sources(self) -> _Sources:
+        """The params when goal and team are set, else the active scenario folder with its casper.yaml over the mode, top_k and duration_scale params."""
+        params = self._params
+        goal, team = params.GOAL.value, params.TEAM.value
+        if goal and team:
+            return _Sources(goal, team, params.SCENE.value, params.MODE.value, params.TOP_K.value, params.DURATION_SCALE.value)
+        if goal or team:
+            raise ValueError(f"task_layer:=casper needs {PARAM_NAMESPACE}.goal and {PARAM_NAMESPACE}.team together or neither, got goal={goal!r} team={team!r}")
+        folder = self._scenario_dir()
+        if missing := [name for name in ("goal.json", "team.yaml") if not (folder / name).is_file()]:
+            raise ValueError(f"scenario folder {folder} lacks {missing}, task_layer:=casper reads them from the active scenario or takes {PARAM_NAMESPACE}.goal and {PARAM_NAMESPACE}.team")
+        settings_file = folder / SCENARIO_SETTINGS
+        settings = (yaml.safe_load(settings_file.read_text()) or {}) if settings_file.is_file() else {}
+        if not isinstance(settings, dict) or set(settings) - {"mode", "top_k", "duration_scale"}:
+            raise ValueError(f"{settings_file} must map some of mode, top_k, duration_scale, got {settings!r}")
+        scene = folder / "scene.yaml"
+        return _Sources(
+            goal=str(folder / "goal.json"),
+            team=str(folder / "team.yaml"),
+            scene=params.SCENE.value or (str(scene) if scene.is_file() else ""),
+            mode=_mode(settings["mode"]) if "mode" in settings else params.MODE.value,
+            top_k=int(settings.get("top_k", params.TOP_K.value)),
+            duration_scale=float(settings.get("duration_scale", params.DURATION_SCALE.value)),
+        )
+
     def _load(self) -> tuple[Goal, Schedule, Allocation]:
-        goal_path, team_path = self._params.GOAL.value, self._params.TEAM.value
-        if not goal_path or not team_path:
-            raise ValueError(f"task_layer:=casper needs {PARAM_NAMESPACE}.goal and {PARAM_NAMESPACE}.team, got goal={goal_path!r} team={team_path!r}")
+        self._sources = sources = self._resolve_sources()
+        goal_path, team_path = sources.goal, sources.team
         goal = load_goal(goal_path)
         zones = set(self._ctx.world_manager.world_compacted().zone_ref_names())
         if unknown := sorted({zone for task in goal.tasks.values() for zone in task.workspaces or () if zone not in zones}):
             raise ValueError(f"{goal_path}: workspaces {unknown} are no zones of this world, zones: {sorted(zones)}")
         team_file = load_team(team_path, {name: derived_constraints(manager) for name, manager in self._ctx.robots.items()})
-        allocation = allocate(goal, team_file.team, self._params.MODE.value, self._params.TOP_K.value)
+        allocation = allocate(goal, team_file.team, sources.mode, sources.top_k)
         self._members = tuple(team_file.team.members)
         self._pedestrians = team_file.pedestrians
         if self._pedestrians and self._driver is None:
             self._driver = PedDriver(self.node, self._ctx)
         for task_id, assignment in allocation.assignments.items():
             self._logger.info(f"casper {allocation.mode.value}: {task_id} -> {assignment.member} ({assignment.score:.2f}), fallbacks {list(assignment.fallbacks)}")
-        scene_path = self._params.SCENE.value
-        self._scene = load_scene(scene_path) if scene_path else None
+        self._scene = load_scene(sources.scene) if sources.scene else None
         self._site = None
         if self._scene is not None:
             validate_scene(self._scene, goal, self._ctx)
             self._site = make_site(self._ctx)
         return goal, Schedule(goal, allocation), allocation
+
+    async def fleet_for(self, record: EpisodeRecord, params: Mapping[str, str]) -> Sequence[FleetEntry] | None:
+        """The fleet the inner robot mode wants for the record."""
+        return await self._inner.fleet_for(record, params)
 
     async def reset_robots(self, record: EpisodeRecord) -> ResetPlan:
         """The inner robot mode's plan without tasks for the team robots, which get theirs on the episode's ticks."""
@@ -183,10 +232,10 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
                 task="",
                 kind="allocated",
                 detail={
-                    "goal": self._params.GOAL.value,
-                    "team": self._params.TEAM.value,
+                    "goal": self._sources.goal,
+                    "team": self._sources.team,
                     "mode": allocation.mode.value,
-                    "top_k": self._params.TOP_K.value,
+                    "top_k": self._sources.top_k,
                     "assignments": {task_id: {"member": a.member, "score": a.score, "fallbacks": list(a.fallbacks)} for task_id, a in allocation.assignments.items()},
                     "ranking": {task_id: [[member, score] for member, score in scored] for task_id, scored in allocation.ranking.items()},
                     "workload": {member: sum(1 for a in allocation.assignments.values() if a.member == member) for member in self._members},
@@ -254,7 +303,7 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
         self._logger.info(f"casper {ped} starts {task_id}")
         if bound:
             return self._fail(schedule, task_id, ped)
-        self._driver.start(self._declared[ped], task.workspaces or (), task.duration * self._params.DURATION_SCALE.value)
+        self._driver.start(self._declared[ped], task.workspaces or (), task.duration * self._sources.duration_scale)
         self._walking[ped] = task_id
         return True
 
@@ -308,7 +357,7 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
             manager = self._ctx.robots[robot]
             request = request_for(
                 goal.tasks[task_id],
-                self._params.DURATION_SCALE.value,
+                self._sources.duration_scale,
                 self._scene,
                 self._site,
                 arm_reach(manager) if self._scene is not None else None,
