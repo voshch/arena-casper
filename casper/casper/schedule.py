@@ -9,7 +9,7 @@ from casper.allocation import Allocation
 from casper.goal import Goal
 
 
-class Status(str, enum.Enum):
+class Status(enum.StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     DONE = "done"

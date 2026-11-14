@@ -172,13 +172,18 @@ def allocation_rows(run_id: str, events: Sequence[Event], goal: Goal, timestamp:
     assignments: Mapping[str, Mapping[str, typing.Any]] = detail["assignments"]
     ranking: Mapping[str, list[list[typing.Any]]] = detail["ranking"]
     workload: Mapping[str, int] = detail["workload"]
-    rebalancing = mode == _REBALANCING_MODE
+    initial: Mapping[str, Mapping[str, typing.Any]] | None = detail.get("initial")
+    rebalancing = mode == _REBALANCING_MODE and initial is None
+    initial_workload = {agent_id: sum(1 for a in (initial or assignments).values() if a["member"] == agent_id) for agent_id in workload}
     task_rows: list[Row] = []
     gaps: list[float] = []
     for task_id, task in goal.tasks.items():
         assignment = assignments.get(task_id)
         agent = assignment["member"] if assignment else None
         score = assignment["score"] if assignment else None
+        first = (initial or assignments).get(task_id)
+        first_agent = first["member"] if first else None
+        first_score = first["score"] if first else None
         scores = [pair[1] for pair in ranking.get(task_id, [])]
         best = max(scores) if scores else None
         gap = best - score if best is not None and score is not None else None
@@ -191,11 +196,11 @@ def allocation_rows(run_id: str, events: Sequence[Event], goal: Goal, timestamp:
                 "mode": mode,
                 "is_end_goal": task.end_goal,
                 "context": task.context,
-                "initial_agent": None if rebalancing else agent,
-                "initial_score": None if rebalancing else score,
+                "initial_agent": None if rebalancing else first_agent,
+                "initial_score": None if rebalancing else first_score,
                 "final_agent": agent,
                 "final_score": score,
-                "was_rebalanced": None if rebalancing else False,
+                "was_rebalanced": None if rebalancing else first_agent != agent,
                 "final_status": _final_status(events, task_id) if assignment else "not assigned",
                 "top_candidates": json.dumps([str(name) for name in assignment["fallbacks"]]) if assignment else "[]",
                 "best_possible_score": best,
@@ -207,20 +212,22 @@ def allocation_rows(run_id: str, events: Sequence[Event], goal: Goal, timestamp:
     agent_rows: list[Row] = []
     for agent_id in agents:
         final = workload.get(agent_id, 0)
+        start = initial_workload.get(agent_id, 0)
         agent_rows.append(
             {
                 "run_id": run_id,
                 "agent_id": agent_id,
                 "mode": mode,
-                "initial_task_count": None if rebalancing else final,
+                "initial_task_count": None if rebalancing else start,
                 "final_task_count": final,
-                "task_count_delta": None if rebalancing else 0,
+                "task_count_delta": None if rebalancing else final - start,
                 "is_idle": final == 0,
             }
         )
     counts = [row["final_task_count"] for row in agent_rows]
     idle = sum(1 for row in agent_rows if row["is_idle"])
     tasks = len(task_rows)
+    moved = sum(1 for row in task_rows if row["was_rebalanced"])
     summary: Row = {
         "run_id": run_id,
         "mode": mode,
@@ -228,8 +235,8 @@ def allocation_rows(run_id: str, events: Sequence[Event], goal: Goal, timestamp:
         "num_tasks": tasks,
         "num_agents": len(agent_rows),
         "num_unassigned_tasks": sum(1 for row in task_rows if row["final_agent"] is None),
-        "num_rebalanced_tasks": None if rebalancing else 0,
-        "pct_rebalanced": None if rebalancing else 0.0,
+        "num_rebalanced_tasks": None if rebalancing else moved,
+        "pct_rebalanced": None if rebalancing else (moved / tasks * 100.0 if tasks else 0.0),
         "num_idle_agents": idle,
         "pct_idle_agents": idle / len(agent_rows) * 100.0 if agent_rows else 0.0,
         "max_tasks_per_agent": max(counts) if counts else 0,

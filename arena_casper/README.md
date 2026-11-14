@@ -59,8 +59,9 @@ out of the regular tasks.
 A task is ready once its predecessors are done. Tasks with `time_to_clean: false` also wait
 until every `subgoal_level: 1` task outside `at_end` is done. Each team robot runs its ready
 task of the lowest priority number, one at a time, as a `GoToPhase` per workspace in order,
-holding at the last for `duration * duration_scale` seconds. A failed task moves to its next
-fallback candidate that has not failed it, with none left the episode aborts. A robot given a
+holding at the last for `duration * duration_scale` seconds. A failed task, a task whose
+request its robot refuses included, moves to its next fallback candidate that has not failed
+it, with none left the episode aborts. A robot given a
 task from outside (RunTask, SubmitTask) gets its interrupted task back once that one ends. The
 episode is done when every task is.
 
@@ -123,7 +124,7 @@ Writes the CSV files of CASPER_MAS's `ExperimentLogger` with its column names an
 - `task_allocation.csv`: `final_*` columns are the allocation at reset, `final_status` the last of `done`, `running`, `failed`, `assigned` from the events (`not assigned` without an allocation). `top_candidates` is the task's fallbacks.
 - `agent_workload.csv`: every member of the team, idle ones with 0.
 - `allocation_summary.csv`: `timestamp` is the export's wall-clock time.
-- The allocation is reported after rebalancing, so in mode `balance_workload` the columns that compare before and after stay empty: `initial_agent`, `initial_score`, `was_rebalanced`, `initial_task_count`, `task_count_delta`, `num_rebalanced_tasks`, `pct_rebalanced`. In the other modes nothing is rebalanced and the initial columns equal the final ones.
+- The `allocated` event carries the allocation before rebalancing as `initial`, which fills `initial_agent`, `initial_score`, `was_rebalanced`, `initial_task_count`, `task_count_delta`, `num_rebalanced_tasks` and `pct_rebalanced`. In mode `balance_workload` a record without `initial` leaves these columns empty. In the other modes nothing is rebalanced and the initial columns equal the final ones.
 - `idle_events.csv` and `shutdown_events.csv` are not written.
 
 ## Convert

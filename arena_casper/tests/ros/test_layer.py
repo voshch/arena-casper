@@ -18,7 +18,7 @@ def _ros_gate() -> None:
 
 
 class _Manager:
-    def __init__(self, name: str, kinds: tuple[str, ...] = ("goto_pose",)) -> None:
+    def __init__(self, name: str, kinds: tuple[str, ...] = ("goto_pose",), refuse: str = "") -> None:
         from arena_runtime.env.robot_manager.task_runner import TaskRunner
         from arena_runtime.env.task_api import TaskKind
 
@@ -26,12 +26,15 @@ class _Manager:
         self.accepts = frozenset(TaskKind(kind) for kind in kinds)
         self.runner = TaskRunner(robot=name)
         self.requests: list[object] = []
+        self.refuse = refuse
 
     @property
     async def is_done(self) -> bool:
         return self.runner.done
 
     async def submit_task(self, request: object, start: object = None, pedestrians: object = ()) -> None:
+        if self.refuse:
+            raise ValueError(self.refuse)
         self.requests.append(request)
         self.runner.submit(request.phases, request.conditions)
 
@@ -181,6 +184,19 @@ def test_failed_task_goes_to_its_fallback_robot(tmp_path: pathlib.Path) -> None:
     assert aborted == []
 
 
+def test_a_task_the_robot_refuses_goes_to_its_fallback_robot(tmp_path: pathlib.Path) -> None:
+    r0, r1 = _Manager("r0", refuse="goto target 'kitchen' has no free cell"), _Manager("r1")
+    task, _, aborted = _casper(tmp_path, [{"id": "cook", "required_constraints": {"workspace": ["kitchen"]}}], [], {"r0": _member(0.9), "r1": _member(0.5)}, [r0, r1])
+    asyncio.run(task.reset_robots(_record()))
+    task.events.clear()
+    asyncio.run(task.tick({}, []))
+    asyncio.run(task.tick({}, []))
+    assert r0.requests == []
+    assert _targets(r1.requests[0]) == [("kitchen", 0.0)]
+    assert [(event.kind, event.robot) for event in task.events] == [("started", "r0"), ("failed", "r0"), ("reassigned", "r1"), ("started", "r1")]
+    assert aborted == []
+
+
 def test_task_failed_on_every_candidate_aborts_the_episode(tmp_path: pathlib.Path) -> None:
     r0 = _Manager("r0")
     task, _, aborted = _casper(tmp_path, [{"id": "cook", "required_constraints": {"workspace": ["kitchen"]}}], [], {"r0": _member(0.9)}, [r0])
@@ -237,6 +253,7 @@ def test_reset_reports_the_allocation_and_each_assignment(tmp_path: pathlib.Path
     assert allocated.detail["assignments"] == {"cook": {"member": "r0", "score": 0.9, "fallbacks": ["r1"]}, "greet": {"member": "r0", "score": 0.9, "fallbacks": []}}
     assert allocated.detail["ranking"] == {"cook": [["r0", 0.9], ["r1", 0.5]], "greet": [["r0", 0.9]]}
     assert allocated.detail["workload"] == {"r0": 2, "r1": 0}
+    assert allocated.detail["initial"] == {"cook": {"member": "r0", "score": 0.9}, "greet": {"member": "r0", "score": 0.9}}
     assert [(event.task, event.kind, event.robot, event.detail) for event in assigned] == [
         ("cook", "assigned", "r0", {"score": 0.9, "fallbacks": ["r1"]}),
         ("greet", "assigned", "r0", {"score": 0.9, "fallbacks": []}),

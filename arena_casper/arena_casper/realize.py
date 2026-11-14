@@ -13,6 +13,7 @@ from arena_casper.scene import Binding, Scene, Site
 
 REACH_FRAME = "odom"
 PLACE_FRAME = "base_link"
+SETTLE = 1.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -35,7 +36,7 @@ def _stand_and_reach(target: Pose, zone: Pose, approach: float | None, arm: ArmR
     stand = Position(target.position.x - arm.standoff * math.cos(heading), target.position.y - arm.standoff * math.sin(heading), 0.0)
     facing = Orientation.from_yaw(heading)
     return [
-        GoToPhase(pose=Pose(stand, facing), tolerance_radius=arm.slack, tolerance_angle=arm.yaw_slack),
+        GoToPhase(pose=Pose(stand, facing), tolerance_radius=arm.slack, tolerance_angle=arm.yaw_slack, hold_time=SETTLE),
         ReachPhase(target=Pose(site.realize(target).position, facing), frame=REACH_FRAME),
     ]
 
@@ -52,7 +53,7 @@ def _bound_phases(task: GoalTask, binding: Binding, site: Site, arm: ArmReach) -
         phases.append(GoToPhase(target=zone))
     if (place := binding.place) is not None:
         if standing != place.at:
-            phases.append(GoToPhase(target=place.at))
+            phases.append(GoToPhase(target=place.at, hold_time=SETTLE))
         height = site.locate(place.object).position.z if place.z is None else place.z
         phases += [ReachPhase(target=Pose(Position(arm.standoff, 0.0, height), Orientation.identity()), frame=PLACE_FRAME), *_grasp("open", place.object, arm)]
     return phases
@@ -72,5 +73,6 @@ def request_for(task: GoalTask, duration_scale: float, scene: Scene | None = Non
     if arm is None:
         raise ValueError(f"task {task.id!r} has a scene binding and its robot declares no box arm workspace")
     phases = _bound_phases(task, binding, site, arm)
-    next(phase for phase in reversed(phases) if isinstance(phase, GoToPhase)).hold_time = hold
+    last = next(phase for phase in reversed(phases) if isinstance(phase, GoToPhase))
+    last.hold_time = max(hold, last.hold_time or 0.0)
     return TaskRequest(phases=phases, task=task.id)

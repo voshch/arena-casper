@@ -76,6 +76,19 @@ def test_balance_workload_moves_a_task_off_the_busiest_member() -> None:
     assert assignments["t1"].fallbacks == ("a",)
 
 
+def test_allocation_keeps_the_assignment_before_rebalancing() -> None:
+    goal, team = _rebalance_case()
+    allocation = allocate(goal, team, Mode.BALANCE_WORKLOAD, top_k=3)
+    assert {task_id: assignment.member for task_id, assignment in allocation.initial.items()} == {"t1": "a", "t2": "a", "t3": "b", "t4": "a"}
+    assert allocation.assignments["t1"].member == "b"
+
+
+def test_without_rebalancing_the_initial_assignment_is_the_final_one() -> None:
+    goal, team = _rebalance_case()
+    allocation = allocate(goal, team, Mode.SKILL, top_k=3)
+    assert {t: a.member for t, a in allocation.initial.items()} == {t: a.member for t, a in allocation.assignments.items()}
+
+
 def test_assign_then_rebalance_are_the_steps_of_allocate() -> None:
     goal, team = _rebalance_case()
     ranking = rank(goal, team, Mode.BALANCE_WORKLOAD)

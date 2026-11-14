@@ -163,6 +163,21 @@ def test_balance_workload_leaves_the_pre_rebalance_columns_empty(tmp_path: pathl
     assert (summary["num_rebalanced_tasks"], summary["pct_rebalanced"]) == ("", "")
 
 
+def test_balance_workload_fills_the_pre_rebalance_columns_from_initial(tmp_path: pathlib.Path) -> None:
+    events = _events("balance_workload")
+    events[0]["detail"]["initial"] = {"welcome": {"member": "r0", "score": 0.9}, "cook": {"member": "r0", "score": 0.8}, "serve": {"member": "r0", "score": 0.8}}
+    export.export(events, GOAL, "run_1", tmp_path, timestamp=99.0)
+    tasks = {row["task_id"]: row for row in _read(tmp_path / "task_allocation.csv")[1]}
+    assert (tasks["cook"]["initial_agent"], tasks["cook"]["initial_score"], tasks["cook"]["final_agent"], tasks["cook"]["was_rebalanced"]) == ("r0", "0.8", "r1", "True")
+    assert tasks["welcome"]["was_rebalanced"] == "False"
+    agents = {row["agent_id"]: row for row in _read(tmp_path / "agent_workload.csv")[1]}
+    assert (agents["r0"]["initial_task_count"], agents["r0"]["final_task_count"], agents["r0"]["task_count_delta"]) == ("3", "2", "-1")
+    assert (agents["r1"]["initial_task_count"], agents["r1"]["task_count_delta"]) == ("0", "1")
+    summary = _read(tmp_path / "allocation_summary.csv")[1][0]
+    assert summary["num_rebalanced_tasks"] == "1"
+    assert float(summary["pct_rebalanced"]) == pytest.approx(100.0 / int(summary["num_tasks"]))
+
+
 def test_runs_append_with_one_header(tmp_path: pathlib.Path) -> None:
     export.export(_events(), GOAL, "run_1", tmp_path, timestamp=1.0)
     export.export(_events(), GOAL, "run_2", tmp_path, timestamp=2.0)

@@ -17,7 +17,7 @@ Ranking = dict[str, tuple[tuple[str, float], ...]]
 """Per task the qualifying members with their scores, best first, ties in team order."""
 
 
-class Mode(str, enum.Enum):
+class Mode(enum.StrEnum):
     SKILL = "skill"
     PREFERENCE = "preference"
     BALANCE_SKILL_PREFERENCE = "balance_skill_preference"
@@ -36,6 +36,7 @@ class Allocation:
     mode: Mode
     assignments: Mapping[str, Assignment]
     ranking: Ranking
+    initial: Mapping[str, Assignment]
 
 
 class AllocationError(ValueError):
@@ -145,6 +146,7 @@ def allocate(goal: Goal, team: Team, mode: Mode, top_k: int) -> Allocation:
     assignments, workload, unassigned = assign(ranking, top_k)
     if unassigned:
         raise AllocationError(unassigned)
+    initial = {task_id: dataclasses.replace(assignment) for task_id, assignment in assignments.items()}
     if mode is Mode.BALANCE_WORKLOAD:
         rebalance(assignments, ranking, workload, top_k)
-    return Allocation(mode=mode, assignments=assignments, ranking=ranking)
+    return Allocation(mode=mode, assignments=assignments, ranking=ranking, initial=initial)

@@ -7,7 +7,7 @@ from arena_simulation_setup.shared.task import GoToPhase, GraspPhase, ReachPhase
 from arena_simulation_setup.utils.geometry import Orientation, Pose, Position
 from casper.goal import GoalTask, parse_task
 
-from arena_casper.realize import PLACE_FRAME, REACH_FRAME, ArmReach, request_for
+from arena_casper.realize import PLACE_FRAME, REACH_FRAME, SETTLE, ArmReach, request_for
 from arena_casper.scene import Binding, Place, Scene, Site
 
 POSES = {
@@ -105,7 +105,7 @@ def test_carry_picks_at_the_first_workspace_and_places_at_the_last() -> None:
     scene = Scene(tasks={"T": Binding(pick="cup", place=Place(at="garden", object="cup"))})
     phases = _request(_task(["table", "garden"]), scene)
     assert [type(phase).__name__ for phase in phases] == ["GoToPhase", "ReachPhase", "GraspPhase", "GoToPhase", "ReachPhase", "GraspPhase"]
-    assert phases[0].hold_time is None
+    assert phases[0].hold_time == SETTLE
     assert phases[2] == GraspPhase(action="close", object="cup")
     assert phases[3] == GoToPhase(target="garden", hold_time=10.0)
     assert phases[4].frame == PLACE_FRAME
@@ -134,3 +134,10 @@ def test_an_arm_with_a_stow_pose_tucks_after_each_grasp() -> None:
     assert phases[3] == ReachPhase(named_target="stow")
     assert phases[7] == ReachPhase(named_target="stow")
     assert phases[4] == GoToPhase(target="garden", hold_time=10.0)
+
+
+def test_a_goto_before_a_reach_holds_until_the_robot_settles() -> None:
+    scene = Scene(tasks={"T": Binding(pick="cup", place=Place(at="garden", object="cup"))})
+    phases = request_for(_task(["table"]), 0.001, scene, SITE, ARM).phases
+    gotos = [phase for phase in phases if isinstance(phase, GoToPhase)]
+    assert [goto.hold_time for goto in gotos] == [SETTLE, SETTLE]

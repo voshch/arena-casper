@@ -7,6 +7,7 @@ import typing
 from collections.abc import Collection, Mapping
 
 import attrs
+from arena_rclpy_mixins.params import Choices, Param, Range, declare
 from arena_runtime.env.task_api import NodeInterface, PhaseState, RobotManager, TaskKind
 from arena_runtime.env.task_layer import EpisodeRecord, ResetPlan, TaskContext, TaskEvent, TaskModes
 from casper.allocation import Allocation, Mode, allocate
@@ -53,12 +54,12 @@ class CasperParams:
 
     def __init__(self, server: ROSParamServer) -> None:
         self.modes = task_generator_layer.declare_task_params(server)
-        self.GOAL = server.ROSParam[str](f"{PARAM_NAMESPACE}.goal", "")
-        self.TEAM = server.ROSParam[str](f"{PARAM_NAMESPACE}.team", "")
-        self.MODE = server.ROSParam[Mode](f"{PARAM_NAMESPACE}.mode", Mode.SKILL.value, parse=_mode)
-        self.SCENE = server.ROSParam[str](f"{PARAM_NAMESPACE}.scene", "")
-        self.TOP_K = server.ROSParam[int](f"{PARAM_NAMESPACE}.top_k", 3, parse=int)
-        self.DURATION_SCALE = server.ROSParam[float](f"{PARAM_NAMESPACE}.duration_scale", 1.0, parse=float)
+        self.GOAL = declare(server, Param[str](f"{PARAM_NAMESPACE}.goal", "", "CASPER goal JSON file."))
+        self.TEAM = declare(server, Param[str](f"{PARAM_NAMESPACE}.team", "", "Team YAML file."))
+        self.MODE = declare(server, Param[Mode](f"{PARAM_NAMESPACE}.mode", Mode.SKILL.value, "CASPER++ allocation mode.", constraint=Choices(*(mode.value for mode in Mode)), parse=_mode))
+        self.SCENE = declare(server, Param[str](f"{PARAM_NAMESPACE}.scene", "", "Scene file binding tasks to entities and objects, empty for none."))
+        self.TOP_K = declare(server, Param[int](f"{PARAM_NAMESPACE}.top_k", 3, "Fallback candidates kept per task.", constraint=Range(1, None)))
+        self.DURATION_SCALE = declare(server, Param[float](f"{PARAM_NAMESPACE}.duration_scale", 1.0, "Factor from a task's duration to its hold in seconds.", constraint=Range(0.0, None)))
 
     def resolve(self, modes: TaskModes) -> TaskModes:
         return self.modes.resolve(modes)
@@ -171,6 +172,7 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
                     "assignments": {task_id: {"member": a.member, "score": a.score, "fallbacks": list(a.fallbacks)} for task_id, a in allocation.assignments.items()},
                     "ranking": {task_id: [[member, score] for member, score in scored] for task_id, scored in allocation.ranking.items()},
                     "workload": {member: sum(1 for a in allocation.assignments.values() if a.member == member) for member in self._members},
+                    "initial": {task_id: {"member": a.member, "score": a.score} for task_id, a in allocation.initial.items()},
                 },
             )
         )
@@ -185,6 +187,18 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
 
     async def teardown(self) -> None:
         await self._inner.teardown()
+
+    def _fail(self, schedule: Schedule, task_id: str, member: str) -> bool:
+        """Report the failure and the hand-over to the next candidate, False once none is left and the episode is aborted."""
+        report = self._ctx.episode.task_event
+        successor = schedule.fail(task_id)
+        report(TaskEvent(task=task_id, kind="failed", robot=member))
+        if successor is None:
+            self._ctx.episode.abort_episode(f"casper task {task_id} failed on every candidate")
+            return False
+        report(TaskEvent(task=task_id, kind="reassigned", robot=successor, detail={"from": member}))
+        self._logger.warning(f"casper task {task_id} failed on {member}, handed to {successor}")
+        return True
 
     async def tick(self, ended: Mapping[str, PhaseState], assigned: Collection[str]) -> None:
         """Settle the tasks whose request ended, then start each idle team robot's next ready task."""
@@ -207,13 +221,8 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
                 schedule.finish(dispatch.task)
                 report(TaskEvent(task=dispatch.task, kind="met", robot=robot))
             elif outcome == "failed":
-                successor = schedule.fail(dispatch.task)
-                report(TaskEvent(task=dispatch.task, kind="failed", robot=robot))
-                if successor is None:
-                    self._ctx.episode.abort_episode(f"casper task {dispatch.task} failed on every candidate")
+                if not self._fail(schedule, dispatch.task, robot):
                     return
-                report(TaskEvent(task=dispatch.task, kind="reassigned", robot=successor, detail={"from": robot}))
-                self._logger.warning(f"casper task {dispatch.task} failed on {robot}, handed to {successor}")
             else:
                 schedule.interrupt(dispatch.task)
                 report(TaskEvent(task=dispatch.task, kind="dropped", robot=robot))
@@ -234,8 +243,14 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
             schedule.start(task_id)
             manager = self._ctx.robots[robot]
             request = request_for(goal.tasks[task_id], self._params.DURATION_SCALE.value, self._scene, self._site, arm_reach(manager) if self._scene is not None else None)
-            await manager.submit_task(request)
             report(TaskEvent(task=task_id, kind="started", robot=robot, detail={"phases": len(request.phases)}))
+            try:
+                await manager.submit_task(request)
+            except ValueError as e:
+                self._logger.warning(f"casper {robot} cannot run {task_id}: {e}")
+                if not self._fail(schedule, task_id, robot):
+                    return
+                continue
             self._dispatched[robot] = _Dispatch(task=task_id, request=manager.runner.phases[-1].request)
             self._logger.info(f"casper {robot} starts {task_id}")
 
