@@ -354,6 +354,7 @@ def test_arm_reach_comes_from_the_arm_workspace_box() -> None:
     assert (reach.standoff, reach.slack) == (pytest.approx(0.7), pytest.approx(0.2))
     assert reach.yaw_slack == pytest.approx(math.atan2(0.5, 0.7) / 2)
     assert reach.stow == "stow"
+    assert reach.carry == "carry"
     assert reach.hand == 0.0
 
 

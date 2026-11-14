@@ -91,15 +91,23 @@ reset.
 A bound task's robot stands off what it picks by the depth midpoint of its box arm workspace,
 within half that depth and half the workspace's lateral angle there. The pick is a `GoToPhase`
 to the pose that standoff short of the grasp point along the approach, a `ReachPhase`
-to the grasp point (in the frame of the picked object, so the arm may touch it) along the approach and a `GraspPhase` close. The grasp point
-is where the arm's tip link goes so that its hand stops 3 cm in front of the face of the object's
+to 10 cm short of the grasp point and a linear `ReachPhase` onto it at a fifth of the arm speed (both in the frame of the picked object, so the arm may touch it) along the approach, and a `GraspPhase` close. The grasp point
+is where the arm's tip link goes so that its hand stops 1 cm in front of the face of the object's
 annotated bounding box that the approach meets, at the box's middle height (at the object's pose
 for an object without one): the hand's length, the TF distance from the tip link to the farthest
 frame below it, comes off along the approach. Then come a
 `GoToPhase` for each remaining workspace and one to the place zone unless the robot already
 stands there, a `ReachPhase` the standoff ahead at the placement height (frame `base_link`) and a
-`GraspPhase` open. An arm that declares a `stow` named pose tucks into it after each grasp. The
-task's `duration * duration_scale` is the hold of the last `GoToPhase`.
+`GraspPhase` open. An arm that declares a `stow` named pose tucks into it after each grasp, and after a close (the object is held) into its `carry` named pose when it declares one, so the held object stays clear of the base and the floor. The
+task's `duration * duration_scale` is the hold of the last `GoToPhase`, and a `GoToPhase` right
+before a `ReachPhase` holds at least 1 s, so the robot is at rest when its arm moves.
+
+A robot that cannot move (a fixed-base arm such as `fr3`, which has no mobile cap) gets no
+`GoToPhase` legs. An unbound task is a hold in place for the scaled duration. A bound task keeps its
+`ReachPhase`, `GraspPhase` and stow phases, reaching from where the robot stands, with the
+heading from the first workspace towards the object (or `approach`), and ends in a hold in
+place for the scaled duration.
+
 Unbound tasks run as before. Objects are located at their authored world poses.
 
 ## Events

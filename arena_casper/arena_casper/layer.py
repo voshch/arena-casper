@@ -40,6 +40,7 @@ __all__ = [
 
 PARAM_NAMESPACE = "task.casper"
 STOW = "stow"
+CARRY = "carry"
 
 
 def _mode(value: object) -> Mode:
@@ -77,7 +78,7 @@ def derived_constraints(manager: RobotManager) -> dict[str, bool]:
 
 
 def arm_reach(manager: RobotManager) -> ArmReach | None:
-    """The reach of the robot's first box arm workspace: its depth middle as standoff, half its depth as slack, half its lateral angle there as yaw slack, its `stow` named pose when it declares one and the TF reach of the hand past the arm's tip link."""
+    """The reach of the robot's first box arm workspace: its depth middle as standoff, half its depth as slack, half its lateral angle there as yaw slack, its `stow` and `carry` named poses when it declares them and the TF reach of the hand past the arm's tip link."""
     from arena_runtime.tf_frames import reach_below
 
     caps = manager.robot_view.effective_caps(manager.robot.resolved_request, frames=manager.robot.frames)
@@ -89,7 +90,9 @@ def arm_reach(manager: RobotManager) -> ArmReach | None:
                 standoff=standoff,
                 slack=(float(hi[0]) - float(lo[0])) / 2,
                 yaw_slack=math.atan2(min(-float(lo[1]), float(hi[1])), standoff) / 2,
+                tip=arm.tip_link,
                 stow=STOW if STOW in arm.named_poses else "",
+                carry=CARRY if CARRY in arm.named_poses else "",
                 hand=reach_below(manager.tf_buffer, manager.frame.tf(arm.tip_link)),
             )
     return None
@@ -245,7 +248,14 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
                 continue
             schedule.start(task_id)
             manager = self._ctx.robots[robot]
-            request = request_for(goal.tasks[task_id], self._params.DURATION_SCALE.value, self._scene, self._site, arm_reach(manager) if self._scene is not None else None)
+            request = request_for(
+                goal.tasks[task_id],
+                self._params.DURATION_SCALE.value,
+                self._scene,
+                self._site,
+                arm_reach(manager) if self._scene is not None else None,
+                can_move=TaskKind.GOTO_POSE in manager.accepts,
+            )
             report(TaskEvent(task=task_id, kind="started", robot=robot, detail={"phases": len(request.phases)}))
             try:
                 await manager.submit_task(request)
