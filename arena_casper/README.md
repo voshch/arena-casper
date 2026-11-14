@@ -3,7 +3,8 @@
 The `casper` task layer, package `arena_casper`: CASPER++ multi-agent task allocation (Leticia
 Berto, University of Manchester, [leticiaberto/CASPER_MAS](https://github.com/leticiaberto/CASPER_MAS))
 as the scheduler of an Arena env. It allocates the tasks of a CASPER goal graph to the env's
-robots and dispatches each robot's tasks as `TaskRequest`s in dependency and priority order.
+robots and pedestrians and dispatches each robot's tasks as `TaskRequest`s in dependency and
+priority order. A pedestrian member walks its tasks itself, see [Pedestrian members](#pedestrian-members).
 
 ```bash
 arena feature tasks add casper
@@ -48,10 +49,11 @@ members:
         transport: [0.9, 1]
 ```
 
-`members` are keyed by robot name. `skills` maps a context to `[level, preference rank]` per
+`members` are keyed by robot name, or by pedestrian name with `kind: pedestrian`. `skills` maps a context to `[level, preference rank]` per
 skill, rank 1 the most preferred. A skill a member lists under one context counts in its other
 contexts at level and rank 0.1. `can_move` and `can_manipulate` come from the robot's adapters
-(goto_pose, reach_pose) and may not be stated. `supervisor_team: false` keeps the supervisor
+(goto_pose, reach_pose) and may not be stated. A pedestrian has `can_move: true` and
+`can_manipulate: false`, also not to be stated. `supervisor_team: false` keeps the supervisor
 out of the regular tasks.
 
 ## Execution
@@ -64,6 +66,41 @@ request its robot refuses included, moves to its next fallback candidate that ha
 it, with none left the episode aborts. A robot given a
 task from outside (RunTask, SubmitTask) gets its interrupted task back once that one ends. The
 episode is done when every task is.
+
+## Pedestrian members
+
+```yaml
+supervisor: jackal_0
+members:
+  jackal_0: {skills: {OfficeMeeting: {transport: [0.9, 1]}}}
+  visitor:
+    kind: pedestrian
+    workspace: [reception, kitchen]
+    skills:
+      OfficeMeeting:
+        greet: [0.8, 1]
+```
+
+`kind` is `robot` (default) or `pedestrian`. A pedestrian member is no robot of the env, a name
+that is both is an error. It is declared in the scenario under `humans:` with no waypoints, and
+the run is started with `task.obstacles:=scenario`. A member the scenario does not declare is an
+error at reset. The layer drops the waypoints of the team pedestrians from the plan, so the human
+simulator does not walk them, and takes their start pose and `velocity` (default 1.0 m/s,
+clamped to 1.7 m/s) from the scenario.
+
+A pedestrian takes its tasks like a robot does. It walks from where it stands to the interior of
+each workspace in order, around the walls and static obstacles of the world with 0.3 m clearance, turns in place at
+sharp corners and holds at the last workspace for `duration * duration_scale` seconds. The hold
+starts once the pedestrian is observed in the zone. A task without workspaces is a hold in place.
+It is met when the hold ends. A task that is bound in the scene (pick, place) fails on a
+pedestrian and moves to its next fallback, as does a walk with no route or a pedestrian that does
+not show up on `arena_peds` within 5 s.
+
+The layer claims the pedestrian on `<env>/human/stream` with a stamped batch on every tick, the
+pose in the realized map frame, walking or idle animation and the joint state of the gait
+generator. The claim stays between tasks. It is released with an empty batch when the goal is done and at
+teardown, and by the stream's 1 s silence timeout otherwise. The team file, goal and scenario stay
+in the abstract frame of the world, the layer converts.
 
 ## Scene
 
@@ -118,8 +155,8 @@ The layer reports each task step through the episode's task events, which the en
 | --- | --- | --- | --- |
 | `allocated` | once per reset, task `""` | | `goal`, `team`, `mode`, `top_k`, `assignments` (`{task: {member, score, fallbacks}}`), `ranking` (`{task: [[member, score]]}`), `workload` (`{member: count}`) |
 | `assigned` | per task at reset | owner | `score`, `fallbacks` |
-| `started` | its request is submitted | runner | `phases` |
-| `met`, `failed` | its request ends that way | runner | |
+| `started` | its request is submitted, or the pedestrian is told to walk | runner | `phases` |
+| `met`, `failed` | its request ends that way, or the pedestrian's walk and hold end or cannot start | runner | |
 | `dropped` | its request is replaced or stopped, or the robot is given a task from outside | runner | |
 | `reassigned` | a failed task moves to a fallback | new owner | `from` |
 | `released` | the clearance opens a `time_to_clean: false` task | owner | |

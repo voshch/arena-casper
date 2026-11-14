@@ -73,7 +73,7 @@ def test_load_scene_names_the_file(tmp_path: pathlib.Path) -> None:
 def test_boxes_example_binds_goal_tasks_the_team_can_take() -> None:
     goal = load_goal(CONFIGS / "goal.json")
     scene = load_scene(CONFIGS / "scene.yaml")
-    team = load_team(CONFIGS / "team.yaml", {"tiago": {"can_move": True, "can_manipulate": True}})
+    team = load_team(CONFIGS / "team.yaml", {"tiago": {"can_move": True, "can_manipulate": True}}).team
     assert set(scene.tasks) <= set(goal.tasks)
     owners = {task_id: assignment.member for task_id, assignment in allocate(goal, team, Mode.SKILL, top_k=1).assignments.items()}
     assert owners == dict.fromkeys(goal.tasks, "tiago")

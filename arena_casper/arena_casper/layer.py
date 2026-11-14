@@ -1,4 +1,4 @@
-"""The casper task layer: task_generator's modes, with CASPER++ allocating and dispatching the team robots' tasks."""
+"""The casper task layer: task_generator's modes, with CASPER++ allocating and dispatching the tasks of the team robots and pedestrians."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from casper.schedule import Schedule
 from task_generator.tasks import layer as task_generator_layer
 from task_generator.tasks.layer import declare_mode_schema, fleet_only_robots, mode_namespaces, next_episode, validate_modes
 
+from arena_casper.pedestrian import PedDriver
 from arena_casper.realize import ArmReach, request_for
 from arena_casper.scene import Scene, Site, load_scene, make_site, validate_scene
 from arena_casper.team import load_team
@@ -24,6 +25,7 @@ if typing.TYPE_CHECKING:
     from arena_rclpy_mixins import ArenaMixinNode
     from arena_rclpy_mixins.ROSParamServer import ROSParamServer
     from arena_runtime.env.task_layer import TaskParams
+    from arena_simulation_setup.shared.entities import DynamicObstacle
     from task_generator.tasks.task import Task
 
 __all__ = [
@@ -105,7 +107,7 @@ class _Dispatch:
 
 
 class CasperTask(NodeInterface["ArenaMixinNode"]):
-    """task_generator's Task for placement, obstacles and modules, CASPER++ for the tasks of the team robots."""
+    """task_generator's Task for placement, obstacles and modules, CASPER++ for the tasks of the team robots and pedestrians."""
 
     def __init__(self, *, node: ArenaMixinNode, ctx: TaskContext, params: CasperParams, inner: Task) -> None:
         super().__init__(node=node)
@@ -115,6 +117,10 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
         self._goal: Goal | None = None
         self._schedule: Schedule | None = None
         self._members: tuple[str, ...] = ()
+        self._pedestrians: frozenset[str] = frozenset()
+        self._declared: dict[str, DynamicObstacle] = {}
+        self._driver: PedDriver | None = None
+        self._walking: dict[str, str] = {}
         self._dispatched: dict[str, _Dispatch] = {}
         self._outside: set[str] = set()
         self._scene: Scene | None = None
@@ -137,9 +143,12 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
         zones = set(self._ctx.world_manager.world_compacted().zone_ref_names())
         if unknown := sorted({zone for task in goal.tasks.values() for zone in task.workspaces or () if zone not in zones}):
             raise ValueError(f"{goal_path}: workspaces {unknown} are no zones of this world, zones: {sorted(zones)}")
-        team = load_team(team_path, {name: derived_constraints(manager) for name, manager in self._ctx.robots.items()})
-        allocation = allocate(goal, team, self._params.MODE.value, self._params.TOP_K.value)
-        self._members = tuple(team.members)
+        team_file = load_team(team_path, {name: derived_constraints(manager) for name, manager in self._ctx.robots.items()})
+        allocation = allocate(goal, team_file.team, self._params.MODE.value, self._params.TOP_K.value)
+        self._members = tuple(team_file.team.members)
+        self._pedestrians = team_file.pedestrians
+        if self._pedestrians and self._driver is None:
+            self._driver = PedDriver(self.node, self._ctx)
         for task_id, assignment in allocation.assignments.items():
             self._logger.info(f"casper {allocation.mode.value}: {task_id} -> {assignment.member} ({assignment.score:.2f}), fallbacks {list(assignment.fallbacks)}")
         scene_path = self._params.SCENE.value
@@ -155,7 +164,10 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
         plan = await self._inner.reset_robots(record)
         self._goal, self._schedule, allocation = self._load()
         self._dispatched.clear()
+        self._walking.clear()
         self._outside.clear()
+        if self._driver is not None:
+            self._driver.reset()
         self._cleared = self._schedule.cleared
         self._report_allocation(allocation)
         for name in self._members:
@@ -186,12 +198,22 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
             report(TaskEvent(task=task_id, kind="assigned", robot=assignment.member, detail={"score": assignment.score, "fallbacks": list(assignment.fallbacks)}))
 
     async def reset_obstacles(self, plan: ResetPlan, record: EpisodeRecord) -> None:
+        """The inner obstacles with the waypoints of the team pedestrians removed, which casper walks itself."""
         await self._inner.reset_obstacles(plan, record)
+        declared = {obstacle.name: obstacle for obstacle in plan.dynamic_obstacles}
+        if missing := sorted(self._pedestrians - set(declared)):
+            raise ValueError(f"casper pedestrian members {missing} are no humans of the scenario, declared: {sorted(declared)}")
+        plan.dynamic_obstacles[:] = [attrs.evolve(obstacle, waypoints=[]) if obstacle.name in self._pedestrians else obstacle for obstacle in plan.dynamic_obstacles]
+        self._declared = {name: obstacle for name, obstacle in declared.items() if name in self._pedestrians}
 
     def after_reset(self) -> None:
         self._inner.after_reset()
 
     async def teardown(self) -> None:
+        if self._driver is not None:
+            self._driver.release_all()
+            self._driver.close()
+            self._driver = None
         await self._inner.teardown()
 
     def _fail(self, schedule: Schedule, task_id: str, member: str) -> bool:
@@ -206,14 +228,45 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
         self._logger.warning(f"casper task {task_id} failed on {member}, handed to {successor}")
         return True
 
+    async def _tick_pedestrians(self, schedule: Schedule) -> bool:
+        """Settle the walks the driver finished or could not plan, False once the episode is aborted."""
+        assert self._driver is not None
+        report = self._ctx.episode.task_event
+        met, failed = await self._driver.tick()
+        for ped in met:
+            task_id = self._walking.pop(ped)
+            schedule.finish(task_id)
+            report(TaskEvent(task=task_id, kind="met", robot=ped))
+        for ped in failed:
+            if not self._fail(schedule, self._walking.pop(ped), ped):
+                return False
+        if schedule.done:
+            self._driver.release_all()
+        return True
+
+    def _start_pedestrian(self, goal: Goal, schedule: Schedule, ped: str, task_id: str) -> bool:
+        """Start the walk of `ped` through the task's workspaces, False once a scene-bound task has failed it with no candidate left."""
+        assert self._driver is not None
+        task = goal.tasks[task_id]
+        schedule.start(task_id)
+        bound = self._scene is not None and task_id in self._scene.tasks
+        self._ctx.episode.task_event(TaskEvent(task=task_id, kind="started", robot=ped, detail={"phases": 0 if bound else len(task.workspaces or ())}))
+        self._logger.info(f"casper {ped} starts {task_id}")
+        if bound:
+            return self._fail(schedule, task_id, ped)
+        self._driver.start(self._declared[ped], task.workspaces or (), task.duration * self._params.DURATION_SCALE.value)
+        self._walking[ped] = task_id
+        return True
+
     async def tick(self, ended: Mapping[str, PhaseState], assigned: Collection[str]) -> None:
-        """Settle the tasks whose request ended, then start each idle team robot's next ready task."""
+        """Settle the tasks whose request ended, then start each idle team member's next ready task."""
         await self._inner.tick(ended, assigned)
         goal, schedule = self._goal, self._schedule
         if goal is None or schedule is None:
             return
         report = self._ctx.episode.task_event
-        for robot in set(assigned) & set(self._members):
+        robots = [name for name in self._members if name not in self._pedestrians]
+        for robot in set(assigned) & set(robots):
             self._outside.add(robot)
             if (dispatch := self._dispatched.pop(robot, None)) is not None:
                 schedule.interrupt(dispatch.task)
@@ -237,10 +290,15 @@ class CasperTask(NodeInterface["ArenaMixinNode"]):
                 if task.awaits_clearance:
                     report(TaskEvent(task=task_id, kind="released", robot=schedule.states[task_id].owner))
         self._cleared = schedule.cleared
+        if self._driver is not None and not await self._tick_pedestrians(schedule):
+            return
         for robot in list(self._outside):
             if await self._ctx.robots[robot].is_done:
                 self._outside.discard(robot)
-        for robot in self._members:
+        for ped in sorted(self._pedestrians - self._walking.keys()):
+            if (task_id := schedule.next_for(ped)) is not None and not self._start_pedestrian(goal, schedule, ped, task_id):
+                return
+        for robot in robots:
             if robot in self._outside or robot in self._dispatched:
                 continue
             task_id = schedule.next_for(robot)
