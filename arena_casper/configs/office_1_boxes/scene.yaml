@@ -4,5 +4,5 @@ tasks:
   DeliverBox:
     place: {object: storage_box_20_2nd_2, at: reception}
   RelocateBox:
-    pick: {object: storage_box_21_2nd_1, approach: 0.0}
+    pick: {object: storage_box_30_2nd_2, approach: 0.0}
     place: meeting_room_big

@@ -77,3 +77,23 @@ def test_boxes_example_binds_goal_tasks_the_team_can_take() -> None:
     assert set(scene.tasks) <= set(goal.tasks)
     owners = {task_id: assignment.member for task_id, assignment in allocate(goal, team, Mode.SKILL, top_k=1).assignments.items()}
     assert owners == dict.fromkeys(goal.tasks, "tiago")
+
+
+def test_place_on_a_support_parses_with_its_approach() -> None:
+    scene = parse_scene({"tasks": {"Deliver": {"place": {"object": "cup", "at": "garden", "onto": "table", "approach": 1.5}}}})
+    assert scene.tasks["Deliver"] == Binding(place=Place(at="garden", object="cup", onto="table", approach=1.5))
+
+
+@pytest.mark.parametrize(
+    ("raw", "error"),
+    [
+        ({"place": {"object": "cup", "at": "garden", "onto": "table", "z": 0.9}}, "place takes the height of what it is on, drop place.z"),
+        ({"place": {"object": "cup", "at": "garden", "approach": 0.0}}, "place.approach needs place.onto"),
+        ({"place": {"object": "cup", "at": "garden", "onto": ""}}, "place.onto must be a name"),
+        ({"place": {"object": "cup", "at": "garden", "onto": "table", "approach": "north"}}, "place.approach must be a number"),
+    ],
+    ids=["height_and_support", "approach_without_support", "empty_support", "named_approach"],
+)
+def test_a_bad_place_on_a_support_is_refused(raw: dict, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        parse_scene({"tasks": {"A": raw}})

@@ -77,7 +77,7 @@ tasks:
   DeliverBox:
     place: {object: storage_box_20_2nd_2, at: reception}
   RelocateBox:
-    pick: {object: storage_box_21_2nd_1, approach: 0.0}
+    pick: {object: storage_box_30_2nd_2, approach: 0.0}
     place: meeting_room_big
 ```
 
@@ -90,8 +90,12 @@ reset.
 
 A bound task's robot stands off what it picks by the depth midpoint of its box arm workspace,
 within half that depth and half the workspace's lateral angle there. The pick is a `GoToPhase`
-to the pose that standoff short of the object along the approach, a `ReachPhase`
-to the object's pose (frame `odom`) along the approach and a `GraspPhase` close. Then come a
+to the pose that standoff short of the grasp point along the approach, a `ReachPhase`
+to the grasp point (in the frame of the picked object, so the arm may touch it) along the approach and a `GraspPhase` close. The grasp point
+is where the arm's tip link goes so that its hand stops 3 cm in front of the face of the object's
+annotated bounding box that the approach meets, at the box's middle height (at the object's pose
+for an object without one): the hand's length, the TF distance from the tip link to the farthest
+frame below it, comes off along the approach. Then come a
 `GoToPhase` for each remaining workspace and one to the place zone unless the robot already
 stands there, a `ReachPhase` the standoff ahead at the placement height (frame `base_link`) and a
 `GraspPhase` open. An arm that declares a `stow` named pose tucks into it after each grasp. The
@@ -152,5 +156,5 @@ with three jackals, jackal_0 as supervisor.
 [configs/office_1_boxes](configs/office_1_boxes) runs a three-task box demo on world
 `office_1` with one tiago (`robot:=tiago`) as team and supervisor. FetchBox picks the shelf box
 `storage_box_20_2nd_2` in the storage room, DeliverBox places it in reception, RelocateBox picks
-`storage_box_21_2nd_1` from the next shelf and places it in the big meeting room, and BoxesMoved ends the
+`storage_box_30_2nd_2` from the same shelf and places it in the big meeting room, and BoxesMoved ends the
 goal at reception. `scene.yaml` holds the bindings, `goal.json` is in CASPER's format.

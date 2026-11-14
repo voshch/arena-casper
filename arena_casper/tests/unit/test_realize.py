@@ -7,7 +7,7 @@ from arena_simulation_setup.shared.task import GoToPhase, GraspPhase, ReachPhase
 from arena_simulation_setup.utils.geometry import Orientation, Pose, Position
 from casper.goal import GoalTask, parse_task
 
-from arena_casper.realize import PLACE_FRAME, REACH_FRAME, SETTLE, ArmReach, request_for
+from arena_casper.realize import PLACE_FRAME, SETTLE, ArmReach, request_for
 from arena_casper.scene import Binding, Place, Scene, Site
 
 POSES = {
@@ -16,16 +16,11 @@ POSES = {
     "table": Pose(Position(4.0, 1.0, 0.0), Orientation.identity()),
     "garden": Pose(Position(10.0, 11.0, 0.0), Orientation.identity()),
 }
-SHIFT = 100.0
 STANDOFF = 0.6
 ARM = ArmReach(standoff=STANDOFF, slack=0.3, yaw_slack=0.35)
 
 
-def _realize(pose: Pose) -> Pose:
-    return Pose(Position(pose.position.x + SHIFT, pose.position.y, pose.position.z), pose.orientation)
-
-
-SITE = Site(locate=POSES.__getitem__, realize=_realize)
+SITE = Site(locate=POSES.__getitem__)
 
 
 def _task(workspaces: list[str] | None, duration: float = 10.0) -> GoalTask:
@@ -40,6 +35,11 @@ def _request(task: GoalTask, scene: Scene) -> list:
 def _xyz(pose: Pose | None) -> tuple[float, float, float]:
     assert pose is not None
     return tuple(pose.position)
+
+
+def _held(reach: ReachPhase, site: Site = SITE) -> Pose:
+    assert reach.target is not None
+    return site.locate(reach.frame) * reach.target
 
 
 def test_without_a_binding_the_task_is_a_goto_through_its_workspaces_holding_at_the_last() -> None:
@@ -67,19 +67,19 @@ def test_pick_stands_off_the_object_facing_it_from_the_zone() -> None:
     assert grasp == GraspPhase(action="close", object="cup")
 
 
-def test_pick_reaches_the_object_in_the_simulator_frame_along_the_heading() -> None:
+def test_pick_reaches_the_object_in_its_own_frame_along_the_heading() -> None:
     _, reach, _ = _request(_task(["table"]), Scene(tasks={"T": Binding(pick="cup")}))
     assert isinstance(reach, ReachPhase)
-    assert reach.frame == REACH_FRAME
-    assert _xyz(reach.target) == (4.0 + SHIFT, 5.0, 0.8)
-    assert reach.target.orientation.to_yaw() == pytest.approx(math.pi / 2)
+    assert reach.frame == "cup"
+    assert _xyz(_held(reach)) == pytest.approx((4.0, 5.0, 0.8))
+    assert _held(reach).orientation.to_yaw() == pytest.approx(math.pi / 2)
 
 
 def test_pick_approach_fixes_the_heading() -> None:
     goto, reach, _ = _request(_task(["table"]), Scene(tasks={"T": Binding(pick="cup", approach=math.pi)}))
     assert _xyz(goto.pose) == pytest.approx((4.0 + STANDOFF, 5.0, 0.0))
     assert abs(goto.pose.orientation.to_yaw()) == pytest.approx(math.pi)
-    assert abs(reach.target.orientation.to_yaw()) == pytest.approx(math.pi)
+    assert abs(_held(reach).orientation.to_yaw()) == pytest.approx(math.pi)
 
 
 def test_place_goes_to_the_zone_and_reaches_ahead_at_the_object_height() -> None:
@@ -136,8 +136,32 @@ def test_an_arm_with_a_stow_pose_tucks_after_each_grasp() -> None:
     assert phases[4] == GoToPhase(target="garden", hold_time=10.0)
 
 
+BOXED = Site(
+    locate={"box": Pose(Position(2.0, 0.0, 0.5), Orientation.identity()), "turned": Pose(Position(2.0, 0.0, 0.5), Orientation.from_yaw(math.pi / 2)), "table": Pose(Position(0.0, 0.0, 0.0), Orientation.identity())}.__getitem__,
+    extent=lambda name: ((0.4, 0.2, 0.1), (0.0, 0.0, 0.05)) if name in ("box", "turned") else None,
+)
+
+
+def test_pick_reaches_the_near_face_of_an_annotated_box_at_mid_height() -> None:
+    goto, reach, _ = request_for(_task(["table"]), 1.0, Scene(tasks={"T": Binding(pick="box", approach=0.0)}), BOXED, ARM).phases
+    assert _xyz(_held(reach, BOXED)) == pytest.approx((2.0 - 0.2 - 0.03, 0.0, 0.55))
+    assert _xyz(goto.pose) == pytest.approx((2.0 - 0.2 - 0.03 - STANDOFF, 0.0, 0.0))
+
+
+def test_a_turned_box_is_reached_across_its_short_side() -> None:
+    _, reach, _ = request_for(_task(["table"]), 1.0, Scene(tasks={"T": Binding(pick="turned", approach=0.0)}), BOXED, ARM).phases
+    assert _xyz(_held(reach, BOXED)) == pytest.approx((2.0 - 0.1 - 0.03, 0.0, 0.55))
+
+
 def test_a_goto_before_a_reach_holds_until_the_robot_settles() -> None:
     scene = Scene(tasks={"T": Binding(pick="cup", place=Place(at="garden", object="cup"))})
     phases = request_for(_task(["table"]), 0.001, scene, SITE, ARM).phases
     gotos = [phase for phase in phases if isinstance(phase, GoToPhase)]
     assert [goto.hold_time for goto in gotos] == [SETTLE, SETTLE]
+
+
+def test_the_arm_tip_stands_back_by_the_hand_so_the_fingers_stop_short_of_the_face() -> None:
+    arm = ArmReach(standoff=STANDOFF, slack=0.3, yaw_slack=0.35, hand=0.2)
+    goto, reach, _ = request_for(_task(["table"]), 1.0, Scene(tasks={"T": Binding(pick="box", approach=0.0)}), BOXED, arm).phases
+    assert _xyz(_held(reach, BOXED)) == pytest.approx((2.0 - 0.2 - 0.03 - 0.2, 0.0, 0.55))
+    assert _xyz(goto.pose) == pytest.approx((2.0 - 0.2 - 0.03 - 0.2 - STANDOFF, 0.0, 0.0))

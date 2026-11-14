@@ -11,19 +11,20 @@ from casper.goal import GoalTask
 
 from arena_casper.scene import Binding, Scene, Site
 
-REACH_FRAME = "odom"
 PLACE_FRAME = "base_link"
+GRASP_MARGIN = 0.03
 SETTLE = 1.0
 
 
 @dataclasses.dataclass(frozen=True)
 class ArmReach:
-    """How far a robot stands from what it reaches, how far its stand may miss in distance and heading, and the named pose it tucks its arm into after a grasp."""
+    """How far a robot stands from what it reaches, how far its stand may miss in distance and heading, the named pose it tucks its arm into after a grasp and how far its hand reaches past the arm's tip."""
 
     standoff: float
     slack: float
     yaw_slack: float
     stow: str = ""
+    hand: float = 0.0
 
 
 def _grasp(action: str, obj: str, arm: ArmReach) -> list[TaskPhase]:
@@ -31,13 +32,26 @@ def _grasp(action: str, obj: str, arm: ArmReach) -> list[TaskPhase]:
     return [*grasp, ReachPhase(named_target=arm.stow)] if arm.stow else grasp
 
 
-def _stand_and_reach(target: Pose, zone: Pose, approach: float | None, arm: ArmReach, site: Site) -> list[TaskPhase]:
+def _grasp_point(name: str, target: Pose, heading: float, site: Site, hand: float) -> Position:
+    extent = site.extent(name)
+    if extent is None:
+        return Position(target.position.x - hand * math.cos(heading), target.position.y - hand * math.sin(heading), target.position.z)
+    (sx, sy, _sz), center = extent
+    middle = target * Position(*center)
+    turn = heading - target.orientation.to_yaw()
+    back = abs(math.cos(turn)) * sx / 2 + abs(math.sin(turn)) * sy / 2 + GRASP_MARGIN + hand
+    return Position(middle.x - back * math.cos(heading), middle.y - back * math.sin(heading), middle.z)
+
+
+def _stand_and_reach(name: str, zone: Pose, approach: float | None, arm: ArmReach, site: Site) -> list[TaskPhase]:
+    target = site.locate(name)
     heading = math.atan2(target.position.y - zone.position.y, target.position.x - zone.position.x) if approach is None else approach
-    stand = Position(target.position.x - arm.standoff * math.cos(heading), target.position.y - arm.standoff * math.sin(heading), 0.0)
     facing = Orientation.from_yaw(heading)
+    point = _grasp_point(name, target, heading, site, arm.hand)
+    stand = Position(point.x - arm.standoff * math.cos(heading), point.y - arm.standoff * math.sin(heading), 0.0)
     return [
         GoToPhase(pose=Pose(stand, facing), tolerance_radius=arm.slack, tolerance_angle=arm.yaw_slack, hold_time=SETTLE),
-        ReachPhase(target=Pose(site.realize(target).position, facing), frame=REACH_FRAME),
+        ReachPhase(target=target.inverse() * Pose(point, facing), frame=name),
     ]
 
 
@@ -47,7 +61,7 @@ def _bound_phases(task: GoalTask, binding: Binding, site: Site, arm: ArmReach) -
     standing = ""
     if binding.pick:
         standing = route.pop(0)
-        phases += [*_stand_and_reach(site.locate(binding.pick), site.locate(standing), binding.approach, arm, site), *_grasp("close", binding.pick, arm)]
+        phases += [*_stand_and_reach(binding.pick, site.locate(standing), binding.approach, arm, site), *_grasp("close", binding.pick, arm)]
     for zone in route:
         standing = zone
         phases.append(GoToPhase(target=zone))

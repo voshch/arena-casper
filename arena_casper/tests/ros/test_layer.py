@@ -329,10 +329,21 @@ def test_clearance_opening_releases_the_waiting_task(tmp_path: pathlib.Path) -> 
     assert _kinds(task) == [("welcome", "started", "r0"), ("welcome", "met", "r0"), ("tidy", "released", "r0"), ("tidy", "started", "r0")]
 
 
-def _view(model: str) -> SimpleNamespace:
+def _view(model: str, hand: float = 0.0) -> SimpleNamespace:
+    import tf2_ros
+    from arena_rclpy_mixins.shared import FrameNamespace
     from arena_robots.Robot import RobotIdentifier
+    from geometry_msgs.msg import TransformStamped
 
-    return SimpleNamespace(robot_view=RobotIdentifier(model).resolve_sync(), robot=SimpleNamespace(resolved_request={}, frames=None))
+    buffer = tf2_ros.Buffer()
+    if hand:
+        for parent, child, x in (("tiago/arm_tool_link", "tiago/gripper_link", hand / 2), ("tiago/gripper_link", "tiago/gripper_grasping_frame", hand / 2)):
+            t = TransformStamped()
+            t.header.frame_id, t.child_frame_id = parent, child
+            t.transform.translation.x = x
+            t.transform.rotation.w = 1.0
+            buffer.set_transform_static(t, "test")
+    return SimpleNamespace(robot_view=RobotIdentifier(model).resolve_sync(), robot=SimpleNamespace(resolved_request={}, frames=None), tf_buffer=buffer, frame=FrameNamespace(model))
 
 
 def test_arm_reach_comes_from_the_arm_workspace_box() -> None:
@@ -340,9 +351,18 @@ def test_arm_reach_comes_from_the_arm_workspace_box() -> None:
 
     reach = arm_reach(_view("tiago"))
     assert reach is not None
-    assert (reach.standoff, reach.slack) == (pytest.approx(0.6), pytest.approx(0.3))
-    assert reach.yaw_slack == pytest.approx(math.atan2(0.5, 0.6) / 2)
+    assert (reach.standoff, reach.slack) == (pytest.approx(0.7), pytest.approx(0.2))
+    assert reach.yaw_slack == pytest.approx(math.atan2(0.5, 0.7) / 2)
     assert reach.stow == "stow"
+    assert reach.hand == 0.0
+
+
+def test_arm_reach_measures_the_hand_past_the_arm_tip_on_tf() -> None:
+    from arena_casper.layer import arm_reach
+
+    reach = arm_reach(_view("tiago", hand=0.2))
+    assert reach is not None
+    assert reach.hand == pytest.approx(0.2)
 
 
 def test_a_robot_without_an_arm_has_no_reach() -> None:

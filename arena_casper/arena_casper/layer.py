@@ -77,7 +77,9 @@ def derived_constraints(manager: RobotManager) -> dict[str, bool]:
 
 
 def arm_reach(manager: RobotManager) -> ArmReach | None:
-    """The reach of the robot's first box arm workspace: its depth middle as standoff, half its depth as slack, half its lateral angle there as yaw slack, and its `stow` named pose when it declares one."""
+    """The reach of the robot's first box arm workspace: its depth middle as standoff, half its depth as slack, half its lateral angle there as yaw slack, its `stow` named pose when it declares one and the TF reach of the hand past the arm's tip link."""
+    from arena_runtime.tf_frames import reach_below
+
     caps = manager.robot_view.effective_caps(manager.robot.resolved_request, frames=manager.robot.frames)
     for arm in (caps.arm or {}).values():
         ws = arm.workspace
@@ -88,6 +90,7 @@ def arm_reach(manager: RobotManager) -> ArmReach | None:
                 slack=(float(hi[0]) - float(lo[0])) / 2,
                 yaw_slack=math.atan2(min(-float(lo[1]), float(hi[1])), standoff) / 2,
                 stow=STOW if STOW in arm.named_poses else "",
+                hand=reach_below(manager.tf_buffer, manager.frame.tf(arm.tip_link)),
             )
     return None
 
