@@ -18,7 +18,7 @@ def _ros_gate() -> None:
 
 
 class _Manager:
-    def __init__(self, name: str, kinds: tuple[str, ...] = ("goto_pose",)) -> None:
+    def __init__(self, name: str, kinds: tuple[str, ...] = ("goto_pose",), refuse: str = "") -> None:
         from arena_runtime.env.robot_manager.task_runner import TaskRunner
         from arena_runtime.env.task_api import TaskKind
 
@@ -26,12 +26,15 @@ class _Manager:
         self.accepts = frozenset(TaskKind(kind) for kind in kinds)
         self.runner = TaskRunner(robot=name)
         self.requests: list[object] = []
+        self.refuse = refuse
 
     @property
     async def is_done(self) -> bool:
         return self.runner.done
 
     async def submit_task(self, request: object, start: object = None, pedestrians: object = ()) -> None:
+        if self.refuse:
+            raise ValueError(self.refuse)
         self.requests.append(request)
         self.runner.submit(request.phases, request.conditions)
 
@@ -66,19 +69,33 @@ def _member(level: float, workspace: list[str] | None = None) -> dict[str, objec
     return {"skills": {"party": {"work": [level, 1]}}, "workspace": workspace or list(ZONES)}
 
 
-def _casper(tmp_path: pathlib.Path, tasks: list[dict[str, object]], dependencies: list[list[str]], members: dict[str, dict[str, object]], managers: list[_Manager], plan: object = None, duration_scale: float = 1.0) -> tuple[object, _Inner, list[str]]:
+def _casper(tmp_path: pathlib.Path, tasks: list[dict[str, object]], dependencies: list[list[str]], members: dict[str, dict[str, object]], managers: list[_Manager], plan: object = None, duration_scale: float = 1.0, scenario: str = "", settings: dict[str, object] | None = None) -> tuple[object, _Inner, list[str]]:
     import rclpy.logging
     from arena_runtime.env.task_layer import ResetPlan
 
     from casper.allocation import Mode
     from arena_casper.layer import CasperTask
 
-    goal, team = _write(tmp_path, tasks, dependencies, members, supervisor=next(iter(members)))
+    from arena_simulation_setup.tree import SimplePathResolver
+    from arena_simulation_setup.tree.World import WorldIdentifier
+
+    world = f"casper_{tmp_path.name}"
+    folder = tmp_path
+    if scenario:
+        folder = tmp_path / "worlds" / world / "scenarios" / scenario
+        folder.mkdir(parents=True)
+        (folder / "scenario.yaml").write_text("format: arena-scenario/2\n")
+        WorldIdentifier.use(SimplePathResolver(WorldIdentifier, tmp_path / "worlds"))
+        if settings is not None:
+            (folder / "casper.yaml").write_text(yaml.safe_dump(settings))
+    goal, team = _write(folder, tasks, dependencies, members, supervisor=next(iter(members)))
+    if scenario:
+        goal = team = ""
     aborted: list[str] = []
     events: list[object] = []
     ctx = SimpleNamespace(
         robots={manager.name: manager for manager in managers},
-        world_manager=SimpleNamespace(world_compacted=lambda: SimpleNamespace(zone_ref_names=lambda: list(ZONES))),
+        world_manager=SimpleNamespace(loaded_world=world, world_compacted=lambda: SimpleNamespace(zone_ref_names=lambda: list(ZONES))),
         episode=SimpleNamespace(abort_episode=aborted.append, task_event=events.append),
     )
     params = SimpleNamespace(
@@ -90,7 +107,7 @@ def _casper(tmp_path: pathlib.Path, tasks: list[dict[str, object]], dependencies
         DURATION_SCALE=SimpleNamespace(value=duration_scale),
     )
     inner = _Inner(plan if plan is not None else ResetPlan())
-    node = SimpleNamespace(get_logger=lambda: rclpy.logging.get_logger("test_casper_layer"))
+    node = SimpleNamespace(get_logger=lambda: rclpy.logging.get_logger("test_casper_layer"), get_parameter=lambda name: SimpleNamespace(value=scenario))
     task = CasperTask(node=node, ctx=ctx, params=params, inner=inner)
     task.events = events
     return task, inner, aborted
@@ -181,6 +198,19 @@ def test_failed_task_goes_to_its_fallback_robot(tmp_path: pathlib.Path) -> None:
     assert aborted == []
 
 
+def test_a_task_the_robot_refuses_goes_to_its_fallback_robot(tmp_path: pathlib.Path) -> None:
+    r0, r1 = _Manager("r0", refuse="goto target 'kitchen' has no free cell"), _Manager("r1")
+    task, _, aborted = _casper(tmp_path, [{"id": "cook", "required_constraints": {"workspace": ["kitchen"]}}], [], {"r0": _member(0.9), "r1": _member(0.5)}, [r0, r1])
+    asyncio.run(task.reset_robots(_record()))
+    task.events.clear()
+    asyncio.run(task.tick({}, []))
+    asyncio.run(task.tick({}, []))
+    assert r0.requests == []
+    assert _targets(r1.requests[0]) == [("kitchen", 0.0)]
+    assert [(event.kind, event.robot) for event in task.events] == [("started", "r0"), ("failed", "r0"), ("reassigned", "r1"), ("started", "r1")]
+    assert aborted == []
+
+
 def test_task_failed_on_every_candidate_aborts_the_episode(tmp_path: pathlib.Path) -> None:
     r0 = _Manager("r0")
     task, _, aborted = _casper(tmp_path, [{"id": "cook", "required_constraints": {"workspace": ["kitchen"]}}], [], {"r0": _member(0.9)}, [r0])
@@ -237,6 +267,7 @@ def test_reset_reports_the_allocation_and_each_assignment(tmp_path: pathlib.Path
     assert allocated.detail["assignments"] == {"cook": {"member": "r0", "score": 0.9, "fallbacks": ["r1"]}, "greet": {"member": "r0", "score": 0.9, "fallbacks": []}}
     assert allocated.detail["ranking"] == {"cook": [["r0", 0.9], ["r1", 0.5]], "greet": [["r0", 0.9]]}
     assert allocated.detail["workload"] == {"r0": 2, "r1": 0}
+    assert allocated.detail["initial"] == {"cook": {"member": "r0", "score": 0.9}, "greet": {"member": "r0", "score": 0.9}}
     assert [(event.task, event.kind, event.robot, event.detail) for event in assigned] == [
         ("cook", "assigned", "r0", {"score": 0.9, "fallbacks": ["r1"]}),
         ("greet", "assigned", "r0", {"score": 0.9, "fallbacks": []}),
@@ -252,7 +283,7 @@ def test_tick_reports_start_and_outcome(tmp_path: pathlib.Path) -> None:
     r0.end("met")
     asyncio.run(task.tick({}, []))
     assert _kinds(task) == [("cook", "started", "r0"), ("cook", "met", "r0"), ("greet", "started", "r0")]
-    assert next(event.detail for event in task.events if event.kind == "started") == {"phases": 2}
+    assert next(event.detail for event in task.events if event.kind == "started") == {"phases": 2, "zones": ["kitchen", "garden"]}
 
 
 def test_failure_reports_the_fallback_owner(tmp_path: pathlib.Path) -> None:
@@ -312,10 +343,21 @@ def test_clearance_opening_releases_the_waiting_task(tmp_path: pathlib.Path) -> 
     assert _kinds(task) == [("welcome", "started", "r0"), ("welcome", "met", "r0"), ("tidy", "released", "r0"), ("tidy", "started", "r0")]
 
 
-def _view(model: str) -> SimpleNamespace:
+def _view(model: str, hand: float = 0.0) -> SimpleNamespace:
+    import tf2_ros
+    from arena_rclpy_mixins.shared import FrameNamespace
     from arena_robots.Robot import RobotIdentifier
+    from geometry_msgs.msg import TransformStamped
 
-    return SimpleNamespace(robot_view=RobotIdentifier(model).resolve_sync(), robot=SimpleNamespace(resolved_request={}, frames=None))
+    buffer = tf2_ros.Buffer()
+    if hand:
+        for parent, child, x in (("tiago/arm_tool_link", "tiago/gripper_link", hand / 2), ("tiago/gripper_link", "tiago/gripper_grasping_frame", hand / 2)):
+            t = TransformStamped()
+            t.header.frame_id, t.child_frame_id = parent, child
+            t.transform.translation.x = x
+            t.transform.rotation.w = 1.0
+            buffer.set_transform_static(t, "test")
+    return SimpleNamespace(robot_view=RobotIdentifier(model).resolve_sync(), robot=SimpleNamespace(resolved_request={}, frames=None), tf_buffer=buffer, frame=FrameNamespace(model))
 
 
 def test_arm_reach_comes_from_the_arm_workspace_box() -> None:
@@ -323,12 +365,58 @@ def test_arm_reach_comes_from_the_arm_workspace_box() -> None:
 
     reach = arm_reach(_view("tiago"))
     assert reach is not None
-    assert (reach.standoff, reach.slack) == (pytest.approx(0.6), pytest.approx(0.3))
-    assert reach.yaw_slack == pytest.approx(math.atan2(0.5, 0.6) / 2)
+    assert (reach.standoff, reach.slack) == (pytest.approx(0.7), pytest.approx(0.2))
+    assert reach.yaw_slack == pytest.approx(math.atan2(0.5, 0.7) / 2)
     assert reach.stow == "stow"
+    assert reach.carry == "carry"
+    assert reach.hand == 0.0
+
+
+def test_arm_reach_measures_the_hand_past_the_arm_tip_on_tf() -> None:
+    from arena_casper.layer import arm_reach
+
+    reach = arm_reach(_view("tiago", hand=0.2))
+    assert reach is not None
+    assert reach.hand == pytest.approx(0.2)
 
 
 def test_a_robot_without_an_arm_has_no_reach() -> None:
     from arena_casper.layer import arm_reach
 
     assert arm_reach(_view("jackal")) is None
+
+
+def test_reset_reads_goal_and_team_from_the_active_scenario_folder(tmp_path: pathlib.Path) -> None:
+    r0 = _Manager("r0")
+    task, _, _ = _casper(tmp_path, [{"id": "cook", "required_constraints": {"workspace": ["kitchen"]}}], [], {"r0": _member(0.9)}, [r0], scenario="party")
+    asyncio.run(task.reset_robots(_record()))
+    asyncio.run(task.tick({}, []))
+    assert _targets(r0.requests[0]) == [("kitchen", 0.0)]
+    allocated = next(event for event in task.events if event.kind == "allocated")
+    assert allocated.detail["goal"] == str(tmp_path / "worlds" / f"casper_{tmp_path.name}" / "scenarios" / "party" / "goal.json")
+
+
+def test_scenario_casper_yaml_overrides_mode_top_k_and_duration_scale(tmp_path: pathlib.Path) -> None:
+    r0 = _Manager("r0")
+    task, _, _ = _casper(
+        tmp_path,
+        [{"id": "cook", "duration": 40, "required_constraints": {"workspace": ["kitchen"]}}],
+        [],
+        {"r0": _member(0.9)},
+        [r0],
+        duration_scale=1.0,
+        scenario="party",
+        settings={"mode": "balance_workload", "top_k": 1, "duration_scale": 0.5},
+    )
+    asyncio.run(task.reset_robots(_record()))
+    asyncio.run(task.tick({}, []))
+    assert _targets(r0.requests[0]) == [("kitchen", 20.0)]
+    allocated = next(event for event in task.events if event.kind == "allocated")
+    assert (allocated.detail["mode"], allocated.detail["top_k"]) == ("balance_workload", 1)
+
+
+def test_scenario_folder_without_goal_and_team_is_refused_by_name(tmp_path: pathlib.Path) -> None:
+    task, _, _ = _casper(tmp_path, [{"id": "cook"}], [], {"r0": _member(0.9)}, [_Manager("r0")], scenario="party")
+    (tmp_path / "worlds" / f"casper_{tmp_path.name}" / "scenarios" / "party" / "team.yaml").unlink()
+    with pytest.raises(ValueError, match=r"scenario folder .*party lacks \['team.yaml'\]"):
+        asyncio.run(task.reset_robots(_record()))

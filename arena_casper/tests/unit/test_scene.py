@@ -9,7 +9,8 @@ from casper.goal import load_goal
 from arena_casper.scene import Binding, Place, load_scene, parse_scene
 from arena_casper.team import load_team
 
-CONFIGS = pathlib.Path(__file__).parents[2] / "configs" / "office_1_boxes"
+CONFIGS = pathlib.Path(__file__).parents[5] / "arena_simulation_setup" / "worlds" / "office_1" / "scenarios" / "casper_boxes"
+SCENARIO_FOLDER = pytest.mark.skipif(not CONFIGS.is_dir(), reason="the scenario folders live in the Arena metarepo")
 
 
 def test_pick_and_place_bindings_parse() -> None:
@@ -70,10 +71,31 @@ def test_load_scene_names_the_file(tmp_path: pathlib.Path) -> None:
         load_scene(path)
 
 
+@SCENARIO_FOLDER
 def test_boxes_example_binds_goal_tasks_the_team_can_take() -> None:
     goal = load_goal(CONFIGS / "goal.json")
     scene = load_scene(CONFIGS / "scene.yaml")
-    team = load_team(CONFIGS / "team.yaml", {"tiago": {"can_move": True, "can_manipulate": True}})
+    team = load_team(CONFIGS / "team.yaml", {"tiago": {"can_move": True, "can_manipulate": True}}).team
     assert set(scene.tasks) <= set(goal.tasks)
     owners = {task_id: assignment.member for task_id, assignment in allocate(goal, team, Mode.SKILL, top_k=1).assignments.items()}
     assert owners == dict.fromkeys(goal.tasks, "tiago")
+
+
+def test_place_on_a_support_parses_with_its_approach() -> None:
+    scene = parse_scene({"tasks": {"Deliver": {"place": {"object": "cup", "at": "garden", "onto": "table", "approach": 1.5}}}})
+    assert scene.tasks["Deliver"] == Binding(place=Place(at="garden", object="cup", onto="table", approach=1.5))
+
+
+@pytest.mark.parametrize(
+    ("raw", "error"),
+    [
+        ({"place": {"object": "cup", "at": "garden", "onto": "table", "z": 0.9}}, "place takes the height of what it is on, drop place.z"),
+        ({"place": {"object": "cup", "at": "garden", "approach": 0.0}}, "place.approach needs place.onto"),
+        ({"place": {"object": "cup", "at": "garden", "onto": ""}}, "place.onto must be a name"),
+        ({"place": {"object": "cup", "at": "garden", "onto": "table", "approach": "north"}}, "place.approach must be a number"),
+    ],
+    ids=["height_and_support", "approach_without_support", "empty_support", "named_approach"],
+)
+def test_a_bad_place_on_a_support_is_refused(raw: dict, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        parse_scene({"tasks": {"A": raw}})
